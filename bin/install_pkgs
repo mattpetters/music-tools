@@ -1,8 +1,24 @@
 #!/bin/bash
 
+# Function to display help message
+display_help() {
+    echo "Usage: $0 [-h] /path/to/directory/with/pkg/files"
+    echo "Install all .pkg files in the specified directory."
+    echo ""
+    echo "Options:"
+    echo "  -h    Display this help message"
+    exit 0
+}
+
+# Check if -h option is provided or if no arguments are given
+if [ "$#" -eq 0 ] || [ "$1" = "-h" ]; then
+    display_help
+fi
+
 # Check if exactly one argument (the directory) is provided
 if [ "$#" -ne 1 ]; then
-    echo "Usage: $0 /path/to/directory/with/pkg/files"
+    echo "Error: Invalid number of arguments."
+    echo "Use '$0 -h' for help."
     exit 1
 fi
 
