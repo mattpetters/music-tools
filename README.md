@@ -4,8 +4,21 @@ This repo is a collection of scripts I wrote to help install music plugins faste
 
 ## Usage
 
-```
-./install_pkgs.sh <path to directory with pkg files in it>
+For ease of use probably add the `bin` folder to your shell `$PATH`
 
-./run_patchers.sh <path to directory with .command files in it>
-```
+# For bash users
+cd music-tools
+echo 'export PATH="$PWD/bin:$PATH"' >> ~/.bashrc
+source ~/.bashrc
+
+# For zsh users
+cd music-tools
+echo 'export PATH="$PWD/bin:$PATH"' >> ~/.zshrc
+source ~/.zshrc
+
+
+# Install packages
+./install_pkgs /path/to/pkg/directory
+
+# Run patchers
+./run_patchers /path/to/command/directory
