@@ -25,6 +25,12 @@ pub fn render(app: &App, frame: &mut Frame, area: Rect) {
     if let Some(prompt) = &app.confirming {
         render_confirm(app, frame, area, prompt);
     }
+    if let Some(palette) = &app.recents {
+        render_recents(app, frame, area, palette);
+    }
+    if let Some(history) = &app.history_overlay {
+        render_history(app, frame, area, history);
+    }
 }
 
 fn render_underlying(app: &App, frame: &mut Frame, area: Rect, focused: bool) {
@@ -298,4 +304,118 @@ fn human_size(bytes: u64) -> String {
     } else {
         format!("{:.1}{}", size, UNITS[unit])
     }
+}
+
+fn render_recents(app: &App, frame: &mut Frame, area: Rect, palette: &crate::app::RecentsPalette) {
+    let popup = centered_rect(60, 60, area);
+    frame.render_widget(Clear, popup);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(app.theme.style_border(true))
+        .title(Span::styled(
+            " Recent paths — Enter to apply, Esc to close ",
+            app.theme.style_border(true).fg(app.theme.border_focused),
+        ));
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    let items: Vec<ListItem> = palette
+        .paths
+        .iter()
+        .enumerate()
+        .map(|(i, r)| {
+            let is_cursor = i == palette.cursor;
+            let marker = if is_cursor { "▶" } else { " " };
+            let name_style = if is_cursor {
+                app.theme.style_highlight()
+            } else {
+                app.theme.style_text()
+            };
+            let secs = r
+                .last_used
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let days = secs / 86400;
+            let ago = if days < 1 {
+                "today".to_string()
+            } else if days < 30 {
+                format!("{}d ago", days)
+            } else {
+                format!("{}mo ago", days / 30)
+            };
+            ListItem::new(Line::from(vec![
+                Span::styled(format!(" {} ", marker), app.theme.style_dim()),
+                Span::styled(r.path.clone(), name_style),
+                Span::styled(format!("  ({})", ago), app.theme.style_dim()),
+            ]))
+        })
+        .collect();
+
+    let mut state = ListState::default();
+    state.select(Some(palette.cursor));
+    let list = List::new(items)
+        .highlight_style(app.theme.style_highlight())
+        .highlight_symbol("");
+    frame.render_widget(list, inner);
+}
+
+fn render_history(app: &App, frame: &mut Frame, area: Rect, overlay: &crate::app::HistoryOverlay) {
+    let popup = centered_rect(70, 70, area);
+    frame.render_widget(Clear, popup);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(app.theme.style_border(true))
+        .title(Span::styled(
+            " Job history — Enter to re-run, Esc/h to close ",
+            app.theme.style_border(true).fg(app.theme.border_focused),
+        ));
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    let items: Vec<ListItem> = overlay
+        .jobs
+        .iter()
+        .enumerate()
+        .map(|(i, j)| {
+            let is_cursor = i == overlay.cursor;
+            let marker = if is_cursor { "▶" } else { " " };
+            let badge = j.status.badge();
+            let badge_color = match j.status {
+                crate::jobs::JobStatus::Done => app.theme.log_success,
+                crate::jobs::JobStatus::Failed => app.theme.log_failure,
+                crate::jobs::JobStatus::Cancelled => app.theme.text_dim,
+                crate::jobs::JobStatus::Running => app.theme.log_info,
+            };
+            let started = j.started_at.format("%H:%M:%S").to_string();
+            let exit = j
+                .exit_code
+                .map(|c| format!("exit {c}"))
+                .unwrap_or_else(|| "—".into());
+            let name_style = if is_cursor {
+                app.theme.style_highlight()
+            } else {
+                app.theme.style_text()
+            };
+            ListItem::new(Line::from(vec![
+                Span::styled(format!(" {} ", marker), app.theme.style_dim()),
+                Span::styled(
+                    format!("{} ", badge),
+                    ratatui::style::Style::default().fg(badge_color),
+                ),
+                Span::styled(format!("{:<14}", started), app.theme.style_dim()),
+                Span::styled(format!("{:<22}", j.action_id), name_style),
+                Span::styled(exit, app.theme.style_dim()),
+            ]))
+        })
+        .collect();
+
+    let mut state = ListState::default();
+    state.select(Some(overlay.cursor));
+    let list = List::new(items)
+        .highlight_style(app.theme.style_highlight())
+        .highlight_symbol("");
+    frame.render_stateful_widget(list, inner, &mut state);
 }

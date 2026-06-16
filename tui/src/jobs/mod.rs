@@ -60,7 +60,7 @@ impl JobManager {
         }
 
         let info = action.info();
-        let spec = action.build_command(inputs);
+        let spec = action.build_command(inputs.clone());
 
         let askpass = crate::sudo::ensure_askpass()?;
         let (handle, rx) = if action.requires_sudo() {
@@ -69,7 +69,7 @@ impl JobManager {
             spawn_bare(spec)?
         };
 
-        let job = Job::new(info.id);
+        let job = Job::new(info.id, inputs.clone());
         self.current = Some(RunningJob {
             job,
             handle: Some(handle),
@@ -91,6 +91,8 @@ impl JobManager {
                 running.log_buffer.push(crate::log::LogLine::from_event(ev));
             }
             running.job.complete(JobStatus::Cancelled, None);
+            // Best-effort: write the per-job log file.
+            let _ = running.job.write_log_file();
             self.history.push_front(running.job);
             self.trim_history();
         }
@@ -128,6 +130,8 @@ impl JobManager {
                     // history view can show the full transcript.
                     let mut job = running.job;
                     job.log_buffer = std::mem::take(&mut running.log_buffer);
+                    // Best-effort: write the per-job log file.
+                    let _ = job.write_log_file();
                     self.history.push_front(job);
                     self.trim_history();
                     return Ok(Some(final_status));

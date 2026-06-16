@@ -50,6 +50,8 @@ pub enum InputAction {
     GoHome,
     /// Refresh the current view (browser dir listing, or sidebar in future).
     Refresh,
+    /// Open the recents-locations palette.
+    Recents,
     /// Backspace (used in path-input mode).
     Backspace,
     /// Any printable character. Used in path-input mode.
@@ -94,6 +96,7 @@ pub fn map_key(event: KeyEvent) -> InputAction {
         KeyCode::Char('/') => InputAction::PathInput,
         KeyCode::Char('~') => InputAction::GoHome,
         KeyCode::Char('r') => InputAction::Refresh,
+        KeyCode::Char('@') => InputAction::Recents,
         KeyCode::Backspace => InputAction::Backspace,
 
         // Log

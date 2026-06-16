@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+<!-- git-changelog-on-commit: c873fc985c85cc9790b9f06546d6d162b3d5372f -->
+### Changed
+- Updated .github/workflows/ci.yml,README.md tui/Cargo.lock,tui/Cargo.toml tui/src/actions/mod.rs,tui/src/app.rs tui/src/input.rs,tui/src/jobs/job.rs based on the staged diff so the commit records the current implementation changes.
+
 <!-- git-changelog-on-commit: 8e1bc6e5417685a20cb8a0003429a40e6bdfb21d -->
 ### Changed
 - Updated bin/reset_ableton,tui/src/actions/mod.rs tui/src/actions/patch_ozone.rs,tui/src/actions/reset_ableton.rs tui/src/app.rs,tui/src/ui/main_pane.rs based on the staged diff so the commit records the current implementation changes.

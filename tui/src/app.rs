@@ -14,6 +14,7 @@ use crate::error::Result;
 use crate::input::{map_key, InputAction};
 use crate::jobs::{JobManager, JobStatus};
 use crate::log::{LogLine, LogStream};
+use crate::state::{PersistedState, RecentPath};
 use crate::theme::Theme;
 use crate::ui::browser::Browser;
 
@@ -69,6 +70,21 @@ pub struct ConfirmPrompt {
     pub danger: bool,
 }
 
+/// Recents palette state. When set, a centered popup shows the MRU
+/// list of paths; Enter selects one (and updates the focused
+/// browser's path), Esc closes.
+pub struct RecentsPalette {
+    pub paths: Vec<RecentPath>,
+    pub cursor: usize,
+}
+
+/// Job history overlay. When set, a centered popup lists past jobs;
+/// Enter re-runs the focused one with the same inputs.
+pub struct HistoryOverlay {
+    pub jobs: Vec<crate::jobs::Job>,
+    pub cursor: usize,
+}
+
 /// Top-level app state.
 pub struct App {
     #[allow(dead_code)] // Consumed in M6 (--reset-state), M8 (--dry-run, --log-level).
@@ -87,18 +103,32 @@ pub struct App {
     pub choice_state: HashMap<ActionId, ChoicePicker>,
     /// Active confirmation prompt, if any.
     pub confirming: Option<ConfirmPrompt>,
+    /// Recents palette state, when open.
+    pub recents: Option<RecentsPalette>,
+    /// History overlay state, when open.
+    pub history_overlay: Option<HistoryOverlay>,
+    /// Persisted state (loaded at startup, saved on quit).
+    pub state: PersistedState,
 }
 
 impl App {
     pub fn new(cli: Cli) -> Self {
         let action_metas = actions::metadata();
         let last_status = vec![None; action_metas.len()];
+        let loaded = PersistedState::load();
+
+        // Restore last sidebar selection, if any.
+        let sidebar_index = loaded
+            .last_action
+            .as_deref()
+            .and_then(|id| action_metas.iter().position(|m| m.id == id))
+            .unwrap_or(0);
 
         let mut app = Self {
             cli,
             theme: Theme::default(),
             focus: Focus::Sidebar,
-            sidebar_index: 0,
+            sidebar_index,
             show_help: false,
             log_lines: Vec::new(),
             should_quit: false,
@@ -108,6 +138,9 @@ impl App {
             browsers: HashMap::new(),
             choice_state: HashMap::new(),
             confirming: None,
+            recents: None,
+            history_overlay: None,
+            state: loaded,
         };
         app.push_log(
             LogStream::Info,
@@ -115,7 +148,7 @@ impl App {
         );
         app.push_log(
             LogStream::Info,
-            "M4: reset_ableton + patch_ozone wired. Sidebar badges show last-run status.".into(),
+            "M6: state persistence + recents. @ opens recents.".into(),
         );
         app
     }
@@ -168,6 +201,15 @@ impl App {
                 let drop = self.log_lines.len() - MAX_LOG_LINES;
                 self.log_lines.drain(0..drop);
             }
+        }
+
+        // Persist state on quit. Best-effort; don't block quit on failure.
+        self.state.last_action = self
+            .action_metas
+            .get(self.sidebar_index)
+            .map(|m| m.id.to_string());
+        if let Err(e) = self.state.save() {
+            eprintln!("mtui: warning: could not save state: {e}");
         }
         Ok(())
     }
@@ -357,8 +399,33 @@ impl App {
                     "Yank to clipboard will be wired up in M3 (pbcopy).".into(),
                 );
             }
+            InputAction::Recents => {
+                if !self.state.recent_paths.is_empty() {
+                    self.recents = Some(RecentsPalette {
+                        paths: self.state.recent_paths.clone(),
+                        cursor: 0,
+                    });
+                } else {
+                    self.push_log(
+                        LogStream::Info,
+                        "No recent paths yet. Run an action to populate.".into(),
+                    );
+                }
+            }
+            InputAction::GoUp => {
+                // The browser would have consumed GoUp already (when main
+                // is focused and the action has a browser). If we reach
+                // here, the action has no browser — treat `h` as history.
+                if !self.job_manager.history.is_empty() {
+                    self.history_overlay = Some(HistoryOverlay {
+                        jobs: self.job_manager.history.iter().cloned().collect(),
+                        cursor: 0,
+                    });
+                } else {
+                    self.push_log(LogStream::Info, "No job history yet.".into());
+                }
+            }
             InputAction::OpenEntry
-            | InputAction::GoUp
             | InputAction::ToggleCheck
             | InputAction::PathInput
             | InputAction::GoHome
@@ -366,6 +433,132 @@ impl App {
             | InputAction::Backspace
             | InputAction::Char(_) => {}
             InputAction::Noop => {}
+        }
+        // After the dispatch, also handle the recents palette if it's open.
+        // (We handle it here so any key works, including Char for filtering.)
+        if self.recents.is_some() {
+            self.handle_recents_key(action.clone()).await;
+        }
+        if self.history_overlay.is_some() {
+            self.handle_history_key(action).await;
+        }
+    }
+
+    async fn handle_recents_key(&mut self, action: InputAction) {
+        match action {
+            InputAction::Esc | InputAction::Quit => {
+                self.recents = None;
+            }
+            InputAction::SidebarDown => {
+                if let Some(p) = self.recents.as_mut() {
+                    if p.cursor + 1 < p.paths.len() {
+                        p.cursor += 1;
+                    }
+                }
+            }
+            InputAction::SidebarUp => {
+                if let Some(p) = self.recents.as_mut() {
+                    if p.cursor > 0 {
+                        p.cursor -= 1;
+                    }
+                }
+            }
+            InputAction::Enter => {
+                let chosen = self
+                    .recents
+                    .as_ref()
+                    .and_then(|p| p.paths.get(p.cursor).cloned());
+                self.recents = None;
+                if let Some(recent) = chosen {
+                    self.apply_recent(recent);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Handle input when the history overlay is open.
+    async fn handle_history_key(&mut self, action: InputAction) {
+        match action {
+            InputAction::Esc | InputAction::Quit | InputAction::GoUp => {
+                self.history_overlay = None;
+            }
+            InputAction::SidebarDown => {
+                if let Some(h) = self.history_overlay.as_mut() {
+                    if h.cursor + 1 < h.jobs.len() {
+                        h.cursor += 1;
+                    }
+                }
+            }
+            InputAction::SidebarUp => {
+                if let Some(h) = self.history_overlay.as_mut() {
+                    if h.cursor > 0 {
+                        h.cursor -= 1;
+                    }
+                }
+            }
+            InputAction::Enter => {
+                let chosen = self
+                    .history_overlay
+                    .as_ref()
+                    .and_then(|h| h.jobs.get(h.cursor).cloned());
+                self.history_overlay = None;
+                if let Some(job) = chosen {
+                    self.rerun_job(job).await;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Re-run a job from history with the same inputs.
+    async fn rerun_job(&mut self, job: crate::jobs::Job) {
+        if self.job_manager.is_running() {
+            self.push_log(
+                LogStream::Failure,
+                "A job is already running. Press Esc to cancel.".into(),
+            );
+            return;
+        }
+        let Some(meta) = self
+            .action_metas
+            .iter()
+            .find(|m| m.id == job.action_id)
+            .cloned()
+        else {
+            self.push_log(
+                LogStream::Failure,
+                format!("No action registered for id \"{}\".", job.action_id),
+            );
+            return;
+        };
+        self.push_log(
+            LogStream::Info,
+            format!(
+                "Re-running \"{}\" (job #{}) with previous inputs.",
+                meta.label, job.id
+            ),
+        );
+        self.start_action(&meta, job.inputs).await;
+    }
+
+    fn apply_recent(&mut self, recent: RecentPath) {
+        // Update the current browser (if any) to the chosen path.
+        if let Some(meta) = self.action_metas.get(self.sidebar_index).cloned() {
+            if meta.input_kind == InputKind::Dir || meta.input_kind == InputKind::File {
+                let path = PathBuf::from(&recent.path);
+                let browser = self.browser_for(meta.id, meta.input_kind);
+                browser.set_path(path.clone());
+                self.push_log(
+                    LogStream::Info,
+                    format!("Switched to recent path: {}", recent.path),
+                );
+            } else {
+                self.push_log(
+                    LogStream::Info,
+                    format!("Recent: {} (not applicable to this action)", recent.path),
+                );
+            }
         }
     }
 
@@ -526,6 +719,15 @@ impl App {
         meta: &actions::ActionInfo,
         inputs: crate::actions::ResolvedInputs,
     ) {
+        // Track recents for the directory / file we just used.
+        if let Some(p) = inputs.dir.as_ref() {
+            self.state.push_recent(p);
+        } else if let Some(p) = inputs.file.as_ref() {
+            if let Some(parent) = p.parent() {
+                self.state.push_recent(parent);
+            }
+        }
+
         for action in actions::all() {
             if action.info().id == meta.id {
                 match self.job_manager.start(action.as_ref(), inputs).await {

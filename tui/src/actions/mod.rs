@@ -38,6 +38,15 @@ pub struct ResolvedInputs {
     pub choice: Option<String>,
 }
 
+impl ResolvedInputs {
+    /// True if the given input kind requires user input. Used by
+    /// `mtui --dry-run` to decide whether to build a command.
+    #[allow(dead_code)]
+    pub fn input_kind_requires_user_input(kind: &InputKind) -> bool {
+        !matches!(kind, InputKind::None)
+    }
+}
+
 /// The shape of inputs an action wants. Drives the main-pane widget.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputKind {
