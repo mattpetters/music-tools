@@ -6,26 +6,29 @@
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
+#[cfg(test)]
+use crossterm::event::KeyEventKind;
+
 /// Semantic input actions. UI code branches on these, never on raw `KeyCode`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InputAction {
     /// Quit the application.
     Quit,
     /// Toggle the help overlay.
     Help,
-    /// Cycle focus forward (sidebar → main → log → sidebar).
+    /// Cycle focus forward (sidebar → main → log).
     TabFocusNext,
     /// Cycle focus backward.
     TabFocusPrev,
-    /// Move sidebar selection down by one.
+    /// Move selection down by one. Pane-aware (sidebar vs. browser cursor).
     SidebarDown,
-    /// Move sidebar selection up by one.
+    /// Move selection up by one. Pane-aware.
     SidebarUp,
-    /// Jump sidebar selection to the first item.
+    /// Jump selection to the first item.
     SidebarTop,
-    /// Jump sidebar selection to the last item.
+    /// Jump selection to the last item.
     SidebarBottom,
-    /// Jump directly to action N (1-indexed).
+    /// Jump directly to action N (1-indexed). Always sidebar-focused.
     JumpTo(usize),
     /// Confirm / run the focused action.
     Enter,
@@ -35,12 +38,28 @@ pub enum InputAction {
     ClearLog,
     /// Yank the visible log to the system clipboard (M3+).
     YankLog,
+    /// Open the entry under the browser cursor (cd into dir, or no-op for files).
+    OpenEntry,
+    /// Go up one directory in the browser.
+    GoUp,
+    /// Toggle the "checked" state of the file under the browser cursor.
+    ToggleCheck,
+    /// Focus the path field in the browser.
+    PathInput,
+    /// Jump the browser to `$HOME`.
+    GoHome,
+    /// Refresh the current view (browser dir listing, or sidebar in future).
+    Refresh,
+    /// Backspace (used in path-input mode).
+    Backspace,
+    /// Any printable character. Used in path-input mode.
+    Char(char),
     /// Unhandled key — explicitly a no-op.
     Noop,
 }
 
 pub fn map_key(event: KeyEvent) -> InputAction {
-    // The modifiers-aware form: Ctrl combos first, then plain keys.
+    // Ctrl combos first.
     if event.modifiers.contains(KeyModifiers::CONTROL) {
         return match event.code {
             KeyCode::Char('c') => InputAction::Quit,
@@ -50,23 +69,48 @@ pub fn map_key(event: KeyEvent) -> InputAction {
     }
 
     match event.code {
+        // Quit / help
         KeyCode::Char('q') => InputAction::Quit,
         KeyCode::Char('?') => InputAction::Help,
+
+        // Navigation
         KeyCode::Char('j') | KeyCode::Down => InputAction::SidebarDown,
         KeyCode::Char('k') | KeyCode::Up => InputAction::SidebarUp,
         KeyCode::Char('g') => InputAction::SidebarTop,
         KeyCode::Char('G') => InputAction::SidebarBottom,
+        KeyCode::Char('l') | KeyCode::Right => InputAction::OpenEntry,
+        KeyCode::Char('h') | KeyCode::Left => InputAction::GoUp,
+
+        // Direct jump (sidebar)
         KeyCode::Char('1') => InputAction::JumpTo(1),
         KeyCode::Char('2') => InputAction::JumpTo(2),
         KeyCode::Char('3') => InputAction::JumpTo(3),
         KeyCode::Char('4') => InputAction::JumpTo(4),
         KeyCode::Char('5') => InputAction::JumpTo(5),
         KeyCode::Char('6') => InputAction::JumpTo(6),
+
+        // Browser shortcuts
+        KeyCode::Char(' ') => InputAction::ToggleCheck,
+        KeyCode::Char('/') => InputAction::PathInput,
+        KeyCode::Char('~') => InputAction::GoHome,
+        KeyCode::Char('r') => InputAction::Refresh,
+        KeyCode::Backspace => InputAction::Backspace,
+
+        // Log
         KeyCode::Char('y') => InputAction::YankLog,
+        KeyCode::Char('c') => InputAction::ClearLog,
+
+        // Focus
         KeyCode::Tab => InputAction::TabFocusNext,
         KeyCode::BackTab => InputAction::TabFocusPrev,
+
+        // Run / cancel
         KeyCode::Enter => InputAction::Enter,
         KeyCode::Esc => InputAction::Esc,
+
+        // Catch-all for path-input mode
+        KeyCode::Char(c) => InputAction::Char(c),
+
         _ => InputAction::Noop,
     }
 }
@@ -74,14 +118,14 @@ pub fn map_key(event: KeyEvent) -> InputAction {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crossterm::event::{KeyEvent, KeyEventKind};
+    use crossterm::event::KeyEventState;
 
     fn key(code: KeyCode, mods: KeyModifiers) -> KeyEvent {
         KeyEvent {
             code,
             modifiers: mods,
             kind: KeyEventKind::Press,
-            state: crossterm::event::KeyEventState::NONE,
+            state: KeyEventState::NONE,
         }
     }
 
@@ -126,10 +170,78 @@ mod tests {
     }
 
     #[test]
+    fn arrows_navigate() {
+        assert_eq!(
+            map_key(key(KeyCode::Down, KeyModifiers::NONE)),
+            InputAction::SidebarDown
+        );
+        assert_eq!(
+            map_key(key(KeyCode::Up, KeyModifiers::NONE)),
+            InputAction::SidebarUp
+        );
+        assert_eq!(
+            map_key(key(KeyCode::Right, KeyModifiers::NONE)),
+            InputAction::OpenEntry
+        );
+        assert_eq!(
+            map_key(key(KeyCode::Left, KeyModifiers::NONE)),
+            InputAction::GoUp
+        );
+    }
+
+    #[test]
+    fn browser_shortcuts() {
+        assert_eq!(
+            map_key(key(KeyCode::Char('l'), KeyModifiers::NONE)),
+            InputAction::OpenEntry
+        );
+        assert_eq!(
+            map_key(key(KeyCode::Char('h'), KeyModifiers::NONE)),
+            InputAction::GoUp
+        );
+        assert_eq!(
+            map_key(key(KeyCode::Char(' '), KeyModifiers::NONE)),
+            InputAction::ToggleCheck
+        );
+        assert_eq!(
+            map_key(key(KeyCode::Char('/'), KeyModifiers::NONE)),
+            InputAction::PathInput
+        );
+        assert_eq!(
+            map_key(key(KeyCode::Char('~'), KeyModifiers::NONE)),
+            InputAction::GoHome
+        );
+        assert_eq!(
+            map_key(key(KeyCode::Char('r'), KeyModifiers::NONE)),
+            InputAction::Refresh
+        );
+    }
+
+    #[test]
     fn unknown_keys_are_noop() {
         assert_eq!(
             map_key(key(KeyCode::F(1), KeyModifiers::NONE)),
             InputAction::Noop
+        );
+    }
+
+    #[test]
+    fn chars_passthrough() {
+        assert_eq!(
+            map_key(key(KeyCode::Char('a'), KeyModifiers::NONE)),
+            InputAction::Char('a')
+        );
+        assert_eq!(
+            map_key(key(KeyCode::Char('Z'), KeyModifiers::NONE)),
+            InputAction::Char('Z')
+        );
+    }
+
+    #[test]
+    fn backspace_mapped() {
+        assert_eq!(
+            map_key(key(KeyCode::Backspace, KeyModifiers::NONE)),
+            InputAction::Backspace
         );
     }
 }

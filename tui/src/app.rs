@@ -1,20 +1,19 @@
 //! Top-level application state and event loop.
-//!
-//! The event loop is async so we can `await` the JobManager's
-//! `start` and `cancel_current` methods. `event::poll` is blocking but
-//! safe to call from the `current_thread` runtime — there's no other
-//! task to schedule around it.
+
+use std::collections::HashMap;
+use std::path::PathBuf;
 
 use crossterm::event::{self, Event, KeyEventKind};
 use ratatui::DefaultTerminal;
 
-use crate::actions::{self};
+use crate::actions::{self, ActionId, InputKind};
 use crate::config::Cli;
 use crate::error::Result;
 use crate::input::{map_key, InputAction};
 use crate::jobs::{JobManager, JobStatus};
 use crate::log::{LogLine, LogStream};
 use crate::theme::Theme;
+use crate::ui::browser::Browser;
 
 /// Which pane has keyboard focus.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -24,8 +23,7 @@ pub enum Focus {
     Log,
 }
 
-/// Top-level app state. Owns the theme, focus, sidebar selection, log
-/// buffer, help-overlay flag, and the job manager.
+/// Top-level app state.
 pub struct App {
     #[allow(dead_code)] // Consumed in M6 (--reset-state), M8 (--dry-run, --log-level).
     pub cli: Cli,
@@ -36,12 +34,13 @@ pub struct App {
     pub log_lines: Vec<LogLine>,
     pub should_quit: bool,
     pub job_manager: JobManager,
-    /// Cached metadata for the sidebar. Loaded once at startup from
-    /// [`actions::metadata`].
+    /// Cached metadata for the sidebar.
     pub action_metas: Vec<actions::ActionInfo>,
-    /// Last status of each action's most recent job. Indexed by action
-    /// position; used to drive sidebar status badges.
+    /// Last status of each action's most recent job.
     pub last_status: Vec<Option<JobStatus>>,
+    /// Per-action browser state, keyed by action id. Lazily populated
+    /// when an action is first focused in the main pane.
+    pub browsers: HashMap<ActionId, Browser>,
 }
 
 impl App {
@@ -60,6 +59,7 @@ impl App {
             job_manager: JobManager::new(),
             action_metas,
             last_status,
+            browsers: HashMap::new(),
         };
         app.push_log(
             LogStream::Info,
@@ -67,7 +67,7 @@ impl App {
         );
         app.push_log(
             LogStream::Info,
-            "M2: process + askpass + TestAction wired. Press 1 to run the test.".into(),
+            "M3: real actions wired. Pick one in the sidebar and use the browser.".into(),
         );
         app
     }
@@ -80,7 +80,14 @@ impl App {
         });
     }
 
-    /// Blocking render loop. Returns when the user quits or a draw/poll fails.
+    /// Get or create the browser for an action.
+    fn browser_for(&mut self, action_id: ActionId, input_kind: InputKind) -> &mut Browser {
+        self.browsers
+            .entry(action_id)
+            .or_insert_with(|| Browser::new(default_browser_path(), input_kind))
+    }
+
+    /// Blocking render loop.
     pub async fn run(mut self, mut terminal: DefaultTerminal) -> Result<()> {
         const MAX_LOG_LINES: usize = 2000;
         const POLL_MS: u64 = 50;
@@ -96,14 +103,10 @@ impl App {
                 }
             }
 
-            // Drain new log lines from the current job into the on-screen
-            // log pane. The JobManager keeps the full buffer for history.
             for line in self.job_manager.take_new_logs() {
                 self.push_log(line.stream, line.message);
             }
 
-            // Check whether the current job has finished. If so, push a
-            // summary line and update the sidebar status badge.
             if let Ok(Some(final_status)) = self.job_manager.poll() {
                 self.on_job_finished(final_status);
             }
@@ -134,7 +137,6 @@ impl App {
         };
         self.push_log(stream, msg);
 
-        // Update sidebar badge for this action.
         if let Some(pos) = self.action_metas.iter().position(|m| m.id == action_id) {
             if pos < self.last_status.len() {
                 self.last_status[pos] = Some(status);
@@ -143,7 +145,7 @@ impl App {
     }
 
     async fn handle_key(&mut self, action: InputAction) {
-        // Help overlay is modal: it eats everything except close.
+        // Help overlay is modal.
         if self.show_help {
             match action {
                 InputAction::Quit | InputAction::Help | InputAction::Esc => {
@@ -152,6 +154,20 @@ impl App {
                 _ => {}
             }
             return;
+        }
+
+        // Dispatch to the browser first if the main pane is focused.
+        // The browser consumes navigation keys and returns false for
+        // App-level keys (Enter to run, etc.).
+        if self.focus == Focus::Main {
+            if let Some(meta) = self.action_metas.get(self.sidebar_index).cloned() {
+                if meta.input_kind != InputKind::None {
+                    let browser = self.browser_for(meta.id, meta.input_kind);
+                    if browser.handle_key(action.clone()) {
+                        return;
+                    }
+                }
+            }
         }
 
         match action {
@@ -174,19 +190,29 @@ impl App {
             }
 
             InputAction::SidebarDown => {
-                let max = self.action_metas.len();
-                if self.sidebar_index + 1 < max {
-                    self.sidebar_index += 1;
+                // When the sidebar is focused, move the sidebar cursor.
+                // When main or log is focused, fall through (the browser
+                // already handled it via the dispatch above; for log, the
+                // key is unhandled).
+                if self.focus == Focus::Sidebar {
+                    let max = self.action_metas.len();
+                    if self.sidebar_index + 1 < max {
+                        self.sidebar_index += 1;
+                    }
                 }
             }
             InputAction::SidebarUp => {
-                if self.sidebar_index > 0 {
+                if self.focus == Focus::Sidebar && self.sidebar_index > 0 {
                     self.sidebar_index -= 1;
                 }
             }
-            InputAction::SidebarTop => self.sidebar_index = 0,
+            InputAction::SidebarTop => {
+                if self.focus == Focus::Sidebar {
+                    self.sidebar_index = 0;
+                }
+            }
             InputAction::SidebarBottom => {
-                if !self.action_metas.is_empty() {
+                if self.focus == Focus::Sidebar && !self.action_metas.is_empty() {
                     self.sidebar_index = self.action_metas.len() - 1;
                 }
             }
@@ -213,12 +239,21 @@ impl App {
                 self.push_log(LogStream::Info, "Log cleared.".into());
             }
             InputAction::YankLog => {
-                // M3: implement via pbcopy. M2: log a hint.
                 self.push_log(
                     LogStream::Info,
-                    "Yank to clipboard will be wired up in M3.".into(),
+                    "Yank to clipboard will be wired up in M3 (pbcopy).".into(),
                 );
             }
+            // The browser consumed these, but the App also receives them
+            // (we cloned the action). They're no-ops here.
+            InputAction::OpenEntry
+            | InputAction::GoUp
+            | InputAction::ToggleCheck
+            | InputAction::PathInput
+            | InputAction::GoHome
+            | InputAction::Refresh
+            | InputAction::Backspace
+            | InputAction::Char(_) => {}
             InputAction::Noop => {}
         }
     }
@@ -231,31 +266,74 @@ impl App {
             );
             return;
         }
+
         let Some(meta) = self.action_metas.get(self.sidebar_index).cloned() else {
             return;
         };
 
-        // For M2's placeholders, log a hint and don't actually run.
-        if meta.id != actions::TestAction::ID {
-            self.push_log(
-                LogStream::Info,
-                format!(
-                    "\"{}\" is a placeholder. Real implementation lands in M3+.",
-                    meta.label
-                ),
-            );
-            return;
-        }
+        // Resolve the action's inputs from the browser (if any).
+        let inputs = match meta.input_kind {
+            InputKind::None => crate::actions::ResolvedInputs::default(),
+            InputKind::Dir => {
+                let browser = self.browser_for(meta.id, meta.input_kind);
+                match browser.selected_dir() {
+                    Some(d) => crate::actions::ResolvedInputs {
+                        dir: Some(d),
+                        ..Default::default()
+                    },
+                    None => {
+                        self.push_log(
+                            LogStream::Failure,
+                            format!("Select a directory for \"{}\" first.", meta.label),
+                        );
+                        return;
+                    }
+                }
+            }
+            InputKind::File => {
+                let browser = self.browser_for(meta.id, meta.input_kind);
+                let file = browser.resolved_file().or_else(|| {
+                    // For multi-file actions, run with all checked files.
+                    let files = browser.checked_files();
+                    files.first().cloned()
+                });
+                match file {
+                    Some(f) => crate::actions::ResolvedInputs {
+                        file: Some(f),
+                        ..Default::default()
+                    },
+                    None => {
+                        self.push_log(
+                            LogStream::Failure,
+                            format!("Select a file for \"{}\" first.", meta.label),
+                        );
+                        return;
+                    }
+                }
+            }
+            InputKind::Choice => {
+                let browser = self.browser_for(meta.id, meta.input_kind);
+                let choice = browser.path.to_string_lossy().to_string();
+                if choice.is_empty() {
+                    self.push_log(
+                        LogStream::Failure,
+                        format!("Make a choice for \"{}\" first.", meta.label),
+                    );
+                    return;
+                }
+                crate::actions::ResolvedInputs {
+                    choice: Some(choice),
+                    ..Default::default()
+                }
+            }
+        };
 
-        // Find the action instance by id and start it.
+        // Find the action instance and start it.
         for action in actions::all() {
             if action.info().id == meta.id {
-                match self.job_manager.start(action.as_ref()).await {
+                match self.job_manager.start(action.as_ref(), inputs).await {
                     Ok(()) => {
-                        self.push_log(
-                            LogStream::Info,
-                            format!("Started \"{}\" (job #{}).", meta.label, "—"),
-                        );
+                        self.push_log(LogStream::Info, format!("Started \"{}\".", meta.label));
                     }
                     Err(e) => {
                         self.push_log(
@@ -272,4 +350,8 @@ impl App {
             format!("No action instance registered for id \"{}\".", meta.id),
         );
     }
+}
+
+fn default_browser_path() -> PathBuf {
+    dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"))
 }

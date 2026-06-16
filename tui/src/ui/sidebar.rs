@@ -141,8 +141,8 @@ mod tests {
     #[test]
     fn sidebar_starts_with_category_header() {
         let rows = build_rows(&metas(), &[]);
-        // First category is "Dev" (from the TestAction).
-        assert!(matches!(rows[0], Row::Category(ref c) if c == "Dev"));
+        // First category is "Installers" (the first real action).
+        assert!(matches!(rows[0], Row::Category(ref c) if c == "Installers"));
     }
 
     #[test]

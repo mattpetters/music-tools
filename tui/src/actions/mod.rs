@@ -5,21 +5,29 @@
 //! need from the user" (the [`InputKind`]) from "how does it execute"
 //! ([`build_command`]). New actions are added by:
 //!
-//! 1. Defining a struct and `impl Action` for it (real actions live in
-//!    submodules: `install_pkgs`, `move_kd_plugs`, etc. — added in M3+).
-//! 2. Adding it to [`all`] and [`METADATA`].
-//!
-//! For M2 we have one real action ([`TestAction`]) and six
-//! [`ComingSoonAction`] placeholders that match the spec's six final
-//! actions. The placeholders show a "Coming soon" hint in the main pane
-//! and are replaced in M3+.
+//! 1. Defining a struct and `impl Action` for it in a submodule
+//!    (e.g. [`install_pkgs::InstallPkgsAction`]). Existing submodule
+//!    actions: install_pkgs, move_kd_plugs, run_patchers,
+//!    remove_protection. Coming soon: reset_ableton, patch_ozone.
+//! 2. Adding the struct to [`all`].
 
 use crate::process::CommandSpec;
 
+pub mod install_pkgs;
+pub mod locate;
+pub mod move_kd_plugs;
+pub mod remove_protection;
+pub mod run_patchers;
+
+use install_pkgs::InstallPkgsAction;
+use move_kd_plugs::MoveKdPlugsAction;
+use remove_protection::RemoveProtectionAction;
+use run_patchers::RunPatchersAction;
+
 /// Inputs collected from the user. Default is empty (used by
-/// `TestAction` and by no-input actions).
+/// no-input actions and the TestAction).
 #[derive(Debug, Default, Clone)]
-#[allow(dead_code)] // Fields are populated in M3 when actions take user inputs.
+#[allow(dead_code)] // `choice` is read in M4 by the version picker.
 pub struct ResolvedInputs {
     pub dir: Option<std::path::PathBuf>,
     pub file: Option<std::path::PathBuf>,
@@ -45,7 +53,6 @@ pub type ActionId = &'static str;
 
 /// Display metadata.
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // input_kind is read in M3 (input widgets) and M5 (sidebar polish).
 pub struct ActionInfo {
     pub id: ActionId,
     pub category: &'static str,
@@ -68,16 +75,16 @@ pub trait Action: Send + Sync {
 
     /// Build the command to run, given the user's resolved inputs.
     /// Called once, just before the job is started.
-    fn build_command(&self, _inputs: ResolvedInputs) -> CommandSpec;
+    fn build_command(&self, inputs: ResolvedInputs) -> CommandSpec;
 }
 
 // =====================================================================
-// TestAction (M2 only)
+// TestAction (M2 only; removed once all real actions land)
 // =====================================================================
 
 /// A dev-only action that just runs a shell command. Proves the
 /// process + streaming + cancellation pipeline end-to-end. Lives under
-/// the "Dev" category. Will be removed once real actions land in M3+.
+/// the "Dev" category. Will be removed once all real actions land.
 pub struct TestAction {
     pub shell_command: String,
 }
@@ -113,10 +120,10 @@ impl Action for TestAction {
 }
 
 // =====================================================================
-// ComingSoonAction (placeholder for the six real actions)
+// ComingSoonAction (placeholder for actions not yet implemented)
 // =====================================================================
 
-/// Placeholder used in M2 for the actions that aren't wired up yet.
+/// Placeholder used for actions that aren't wired up yet (M4/M5).
 /// Renders a "Coming soon" main pane and logs a hint when run.
 #[derive(Debug, Clone, Copy)]
 pub struct ComingSoonAction {
@@ -139,17 +146,13 @@ impl Action for ComingSoonAction {
     }
 
     fn requires_sudo(&self) -> bool {
-        // The real actions need sudo; the placeholder is a no-op that
-        // doesn't even spawn anything, so sudo doesn't matter — but
-        // returning true keeps behavior consistent for when these get
-        // swapped out in M3+.
         true
     }
 
     fn build_command(&self, _inputs: ResolvedInputs) -> CommandSpec {
         // We never actually run this — the App short-circuits ComingSoon
         // actions and just logs a "coming soon" line. If we did run it,
-        // the command would do nothing.
+        // `true` would exit 0 immediately.
         CommandSpec::new("true")
     }
 }
@@ -159,7 +162,6 @@ impl Action for ComingSoonAction {
 // =====================================================================
 
 /// Static metadata for all registered actions, in display order.
-/// The sidebar reads from this; the App uses [`all`] to start jobs.
 pub fn metadata() -> Vec<ActionInfo> {
     all().iter().map(|a| a.info()).collect()
 }
@@ -168,40 +170,18 @@ pub fn metadata() -> Vec<ActionInfo> {
 // Registry
 // =====================================================================
 
-/// All registered actions, in display order. New actions are appended.
+/// All registered actions, in display order. Real actions (M3+) come
+/// first by category, then the M4/M5 placeholders, then the dev
+/// TestAction at the very end.
 pub fn all() -> Vec<Box<dyn Action>> {
     vec![
-        Box::new(TestAction::new(
-            "echo 'hello from mtui'; echo 'this is stderr' >&2; sleep 0.2; echo 'done'",
-        )),
-        Box::new(ComingSoonAction {
-            id: "install_pkgs",
-            category: "Installers",
-            label: "Install .pkg files",
-            hint: "Install every .pkg in a chosen directory",
-            input_kind: InputKind::Dir,
-        }),
-        Box::new(ComingSoonAction {
-            id: "run_patchers",
-            category: "Installers",
-            label: "Run patchers (.command)",
-            hint: "Run every .command in a chosen directory",
-            input_kind: InputKind::Dir,
-        }),
-        Box::new(ComingSoonAction {
-            id: "move_kd_plugs",
-            category: "Plugins",
-            label: "Move k'd plugins",
-            hint: "Copy *.vst / *.vst3 / *.component into /Library/Audio/Plug-Ins",
-            input_kind: InputKind::Dir,
-        }),
-        Box::new(ComingSoonAction {
-            id: "remove_protection",
-            category: "Plugins",
-            label: "Remove protection",
-            hint: "Strip xattrs/quarantine and re-codesign a file or folder",
-            input_kind: InputKind::File,
-        }),
+        // Installers
+        Box::new(InstallPkgsAction),
+        Box::new(RunPatchersAction),
+        // Plugins
+        Box::new(MoveKdPlugsAction),
+        Box::new(RemoveProtectionAction),
+        // Maintenance
         Box::new(ComingSoonAction {
             id: "reset_ableton",
             category: "Maintenance",
@@ -209,6 +189,7 @@ pub fn all() -> Vec<Box<dyn Action>> {
             hint: "Back up & clear prefs + templates for an installed Ableton version",
             input_kind: InputKind::Choice,
         }),
+        // System patches
         Box::new(ComingSoonAction {
             id: "patch_ozone",
             category: "System patches",
@@ -216,6 +197,10 @@ pub fn all() -> Vec<Box<dyn Action>> {
             hint: "Binary-patch iZotope Ozone 12 core libraries (system-level)",
             input_kind: InputKind::None,
         }),
+        // Dev
+        Box::new(TestAction::new(
+            "echo 'hello from mtui'; echo 'this is stderr' >&2; sleep 0.2; echo 'done'",
+        )),
     ]
 }
 
@@ -239,25 +224,27 @@ mod tests {
     }
 
     #[test]
-    fn registry_has_test_plus_six_placeholders() {
+    fn registry_has_four_real_plus_two_coming_soon_plus_test() {
         let actions = all();
-        assert_eq!(actions.len(), 7, "1 test + 6 placeholders");
+        // 4 real + 2 placeholders + 1 test = 7
+        assert_eq!(actions.len(), 7);
         let meta = metadata();
         assert_eq!(meta.len(), 7);
-        // First entry is the test action, in the Dev category.
-        assert_eq!(meta[0].id, "test");
-        assert_eq!(meta[0].category, "Dev");
-        // Six placeholders cover the spec's six final actions.
+        // The four M3 actions are present and first.
         let ids: Vec<&str> = meta.iter().map(|m| m.id).collect();
         for required in [
             "install_pkgs",
             "run_patchers",
             "move_kd_plugs",
             "remove_protection",
-            "reset_ableton",
-            "patch_ozone",
         ] {
-            assert!(ids.contains(&required), "missing action: {required}");
+            assert!(ids.contains(&required), "missing real action: {required}");
         }
+        // The M4/M5 placeholders are present and last (before TestAction).
+        for required in ["reset_ableton", "patch_ozone"] {
+            assert!(ids.contains(&required), "missing placeholder: {required}");
+        }
+        // TestAction is last.
+        assert_eq!(meta.last().unwrap().id, TestAction::ID);
     }
 }

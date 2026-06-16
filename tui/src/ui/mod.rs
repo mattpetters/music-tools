@@ -7,6 +7,7 @@
 //! action metadata. In M2 this is replaced by the real `actions` registry
 //! and the visibility here gets tightened.
 
+pub mod browser;
 mod footer;
 mod help;
 mod layout;

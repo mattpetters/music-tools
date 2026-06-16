@@ -46,6 +46,15 @@ impl CommandSpec {
         self
     }
 
+    /// Add a path argument (OsStr-friendly). Equivalent to
+    /// [`arg`](Self::arg) but takes anything convertible to String via
+    /// `OsString` — useful for `PathBuf`, `&Path`, etc.
+    #[allow(dead_code)]
+    pub fn path_arg(mut self, p: impl AsRef<std::ffi::OsStr>) -> Self {
+        self.args.push(p.as_ref().to_string_lossy().to_string());
+        self
+    }
+
     pub fn args<I, S>(mut self, args: I) -> Self
     where
         I: IntoIterator<Item = S>,

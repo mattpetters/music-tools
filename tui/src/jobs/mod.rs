@@ -52,7 +52,7 @@ impl JobManager {
     }
 
     /// Start a new job. Errors if one is already running.
-    pub async fn start(&mut self, action: &dyn Action) -> Result<()> {
+    pub async fn start(&mut self, action: &dyn Action, inputs: ResolvedInputs) -> Result<()> {
         if self.is_running() {
             return Err(color_eyre::eyre::eyre!(
                 "a job is already running; cancel it first"
@@ -60,14 +60,7 @@ impl JobManager {
         }
 
         let info = action.info();
-        let spec = action.build_command(ResolvedInputs::default());
-
-        // For ComingSoon placeholders, we don't actually spawn a child —
-        // the App will log a "coming soon" hint and skip the job.
-        // We detect that case here by checking if the spec is the
-        // placeholder's sentinel `true` command. Cleaner: pass a flag.
-        // For M2 we just always spawn; the placeholder is `true` which
-        // exits immediately.
+        let spec = action.build_command(inputs);
 
         let askpass = crate::sudo::ensure_askpass()?;
         let (handle, rx) = if action.requires_sudo() {
@@ -200,7 +193,9 @@ mod tests {
     async fn start_and_finish_a_test_job() {
         let mut mgr = JobManager::new();
         let action = TestAction::new("echo hi");
-        mgr.start(&action).await.expect("start");
+        mgr.start(&action, ResolvedInputs::default())
+            .await
+            .expect("start");
         assert!(mgr.is_running());
 
         // Poll until the job finishes.
@@ -223,7 +218,9 @@ mod tests {
     async fn cancel_running_job() {
         let mut mgr = JobManager::new();
         let action = TestAction::new("sleep 30");
-        mgr.start(&action).await.expect("start");
+        mgr.start(&action, ResolvedInputs::default())
+            .await
+            .expect("start");
         assert!(mgr.is_running());
 
         mgr.cancel_current().await.expect("cancel");
@@ -236,13 +233,13 @@ mod tests {
     async fn take_new_logs_returns_lines_then_empty() {
         let mut mgr = JobManager::new();
         let action = TestAction::new("echo line1; echo line2; echo line3");
-        mgr.start(&action).await.expect("start");
+        mgr.start(&action, ResolvedInputs::default())
+            .await
+            .expect("start");
 
         let mut saw_lines = false;
         for _ in 0..100 {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-            // Drain logs BEFORE poll() — poll() moves the buffer to history
-            // when the child exits, so post-poll the buffer is empty.
             let logs = mgr.take_new_logs();
             if !logs.is_empty() {
                 assert!(logs.iter().all(|l| l.stream == LogStream::Out));
