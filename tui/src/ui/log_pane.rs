@@ -1,13 +1,14 @@
-//! Bottom log pane: streaming stdout/stderr from running jobs. In M1 there's
-//! no job system yet, so the pane just shows the welcome lines and any
-//! "Enter pressed" log lines.
+//! Bottom log pane: streaming stdout/stderr from running jobs. In M1 there
+//! are no real jobs yet, so the pane shows welcome lines and any
+//! app-emitted log entries. M2+ uses the same renderer for real job output.
 
 use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
 use ratatui::Frame;
 
-use crate::app::{App, Focus, LogLine, LogStream};
+use crate::app::{App, Focus};
+use crate::log::{LogLine, LogStream};
 
 pub fn render(app: &App, frame: &mut Frame, area: Rect) {
     let focused = app.focus == Focus::Log;
@@ -43,17 +44,17 @@ pub fn render(app: &App, frame: &mut Frame, area: Rect) {
 
 fn render_line<'a>(l: &'a LogLine, theme: &crate::theme::Theme) -> Line<'a> {
     let ts = l.timestamp.format("%H:%M:%S").to_string();
-    let (color, glyph) = match l.stream {
-        LogStream::Info => (theme.log_info, "·"),
-        LogStream::Out => (theme.log_out, "›"),
-        LogStream::Err => (theme.log_err, "!"),
-        LogStream::Success => (theme.log_success, "✓"),
-        LogStream::Failure => (theme.log_failure, "✗"),
+    let color = match l.stream {
+        LogStream::Info => theme.log_info,
+        LogStream::Out => theme.log_out,
+        LogStream::Err => theme.log_err,
+        LogStream::Success => theme.log_success,
+        LogStream::Failure => theme.log_failure,
     };
     Line::from(vec![
         Span::styled(format!(" {} ", ts), theme.style_dim()),
         Span::styled(
-            format!("{} ", glyph),
+            format!("{} ", l.stream.badge()),
             ratatui::style::Style::default().fg(color),
         ),
         Span::styled(

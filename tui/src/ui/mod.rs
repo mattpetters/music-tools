@@ -74,7 +74,7 @@ mod tests {
     #[test]
     fn render_does_not_panic_after_navigating_to_each_action() {
         let mut app = make_app();
-        for i in 0..crate::ui::sidebar::ACTION_COUNT {
+        for i in 0..crate::actions::count() {
             app.sidebar_index = i;
             app.focus = crate::app::Focus::Main;
             render_to(120, 40, &app);
