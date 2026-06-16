@@ -1,0 +1,9 @@
+# Rust / Cargo
+tui/target/
+**/*.rs.bk
+
+# OS junk
+.DS_Store
+
+# Local-only override scratch (none right now; convention from dotfiles rules)
+*.local

@@ -1,24 +1,44 @@
-# select from installed versions of ableton
-# list installed versions of ableton
-ls $HOME/Library/Preferences/Ableton/
+#!/bin/bash
 
-# get the version number
-read -p "Enter the version number to reset: " VERSION
+# Reset an installed Ableton version's prefs and templates.
+#
+# Usage: reset_ableton <version>
+#
+# Backs up the preferences and templates to ~/Desktop/, then deletes
+# the live copies. This is the only bash change in the mtui project —
+# it was made interactive to be driveable from a non-tty parent.
 
-# Once user selects
-cp $HOME/Library/Preferences/Ableton/$VERSION/Preferences.cfg $HOME/Desktop/Preferences.backup.cfg
+set -euo pipefail
 
-# remove the preferences file
-rm $HOME/Library/Preferences/Ableton/$VERSION/Preferences.cfg
+VERSION="${1:-}"
+if [[ -z "$VERSION" ]]; then
+    echo "usage: $0 <version>" >&2
+    exit 2
+fi
 
-# rm -rf Undo folder
-rm -rf $HOME/Library/Preferences/Ableton/$VERSION/Undo
+PREFS="$HOME/Library/Preferences/Ableton/$VERSION"
+if [[ ! -d "$PREFS" ]]; then
+    echo "no such version directory: $PREFS" >&2
+    exit 1
+fi
+if [[ ! -f "$PREFS/Preferences.cfg" ]]; then
+    echo "no Preferences.cfg for version $VERSION in $PREFS" >&2
+    exit 1
+fi
 
-# go to the template set 
-ls $HOME/Music/Ableton/User\ Library/Templates
+# Back up the prefs file.
+cp "$PREFS/Preferences.cfg" "$HOME/Desktop/Preferences.backup.cfg"
 
-# copy these to the desktop into a folder called 'Templates Backups'
-cp -r $HOME/Music/Ableton/User\ Library/Templates $HOME/Desktop/Templates\ Backups
-# remove the Templates folder
+# Remove the live prefs and the Undo folder.
+rm "$PREFS/Preferences.cfg"
+rm -rf "$PREFS/Undo"
 
-rm -rf $HOME/Music/Ableton/User\ Library/Templates
+# Back up and remove the Templates folder, if it exists.
+TEMPLATES="$HOME/Music/Ableton/User Library/Templates"
+if [[ -d "$TEMPLATES" ]]; then
+    cp -r "$TEMPLATES" "$HOME/Desktop/Templates Backups"
+    rm -rf "$TEMPLATES"
+fi
+
+echo "Reset Ableton $VERSION."
+echo "  Backups at: ~/Desktop/Preferences.backup.cfg, ~/Desktop/Templates Backups/"

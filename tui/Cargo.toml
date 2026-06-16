@@ -1,0 +1,54 @@
+[package]
+name = "mtui"
+version = "0.1.0"
+edition = "2021"
+description = "Terminal UI for the music-tools scripts"
+license = "MIT"
+repository = "https://github.com/mattpetters/music-tools"
+readme = "README.md"
+publish = false
+
+[[bin]]
+name = "mtui"
+path = "src/main.rs"
+
+[dependencies]
+# TUI
+ratatui = "0.29"
+crossterm = "0.28"
+
+# Async runtime (used in M2+ for process spawning; declared early so M1
+# can use #[tokio::main] without restructuring later).
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "io-util", "sync", "time"] }
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Errors
+eyre = "0.6"
+color-eyre = "0.6"
+
+# Time for log line timestamps
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+
+# Logging (file/stdout, not the on-screen log pane)
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# XDG-style paths for state, recents, and the askpass helper
+dirs = "5"
+
+# Persisted state
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# POSIX signal handling for child process cancellation
+nix = { version = "0.29", features = ["signal", "process"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+
+[dev-dependencies]
+tempfile = "3"
