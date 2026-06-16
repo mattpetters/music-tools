@@ -16,12 +16,16 @@ use crate::process::CommandSpec;
 pub mod install_pkgs;
 pub mod locate;
 pub mod move_kd_plugs;
+pub mod patch_ozone;
 pub mod remove_protection;
+pub mod reset_ableton;
 pub mod run_patchers;
 
 use install_pkgs::InstallPkgsAction;
 use move_kd_plugs::MoveKdPlugsAction;
+use patch_ozone::PatchOzoneAction;
 use remove_protection::RemoveProtectionAction;
+use reset_ableton::ResetAbletonAction;
 use run_patchers::RunPatchersAction;
 
 /// Inputs collected from the user. Default is empty (used by
@@ -125,6 +129,7 @@ impl Action for TestAction {
 
 /// Placeholder used for actions that aren't wired up yet (M4/M5).
 /// Renders a "Coming soon" main pane and logs a hint when run.
+#[allow(dead_code)] // Kept for future actions; current 6 actions are all real.
 #[derive(Debug, Clone, Copy)]
 pub struct ComingSoonAction {
     pub id: ActionId,
@@ -182,21 +187,9 @@ pub fn all() -> Vec<Box<dyn Action>> {
         Box::new(MoveKdPlugsAction),
         Box::new(RemoveProtectionAction),
         // Maintenance
-        Box::new(ComingSoonAction {
-            id: "reset_ableton",
-            category: "Maintenance",
-            label: "Reset Ableton",
-            hint: "Back up & clear prefs + templates for an installed Ableton version",
-            input_kind: InputKind::Choice,
-        }),
+        Box::new(ResetAbletonAction),
         // System patches
-        Box::new(ComingSoonAction {
-            id: "patch_ozone",
-            category: "System patches",
-            label: "Patch iZotope Ozone 12",
-            hint: "Binary-patch iZotope Ozone 12 core libraries (system-level)",
-            input_kind: InputKind::None,
-        }),
+        Box::new(PatchOzoneAction),
         // Dev
         Box::new(TestAction::new(
             "echo 'hello from mtui'; echo 'this is stderr' >&2; sleep 0.2; echo 'done'",
@@ -240,9 +233,16 @@ mod tests {
         ] {
             assert!(ids.contains(&required), "missing real action: {required}");
         }
-        // The M4/M5 placeholders are present and last (before TestAction).
-        for required in ["reset_ableton", "patch_ozone"] {
-            assert!(ids.contains(&required), "missing placeholder: {required}");
+        // All six spec actions plus the dev TestAction.
+        for required in [
+            "install_pkgs",
+            "run_patchers",
+            "move_kd_plugs",
+            "remove_protection",
+            "reset_ableton",
+            "patch_ozone",
+        ] {
+            assert!(ids.contains(&required), "missing action: {required}");
         }
         // TestAction is last.
         assert_eq!(meta.last().unwrap().id, TestAction::ID);

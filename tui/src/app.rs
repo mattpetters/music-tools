@@ -2,10 +2,12 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::time::SystemTime;
 
 use crossterm::event::{self, Event, KeyEventKind};
 use ratatui::DefaultTerminal;
 
+use crate::actions::reset_ableton::{self, AbletonVersion};
 use crate::actions::{self, ActionId, InputKind};
 use crate::config::Cli;
 use crate::error::Result;
@@ -23,6 +25,50 @@ pub enum Focus {
     Log,
 }
 
+/// State for a `Choice`-input-kind action (e.g. reset_ableton).
+pub struct ChoicePicker {
+    pub versions: Vec<AbletonVersion>,
+    pub cursor: usize,
+    #[allow(dead_code)] // Used in M6 to throttle re-discovery.
+    pub last_refresh: Option<SystemTime>,
+}
+
+impl ChoicePicker {
+    pub fn new(versions: Vec<AbletonVersion>) -> Self {
+        Self {
+            versions,
+            cursor: 0,
+            last_refresh: None,
+        }
+    }
+
+    pub fn selected(&self) -> Option<&AbletonVersion> {
+        self.versions.get(self.cursor)
+    }
+
+    pub fn cursor_down(&mut self) {
+        if self.cursor + 1 < self.versions.len() {
+            self.cursor += 1;
+        }
+    }
+
+    pub fn cursor_up(&mut self) {
+        if self.cursor > 0 {
+            self.cursor -= 1;
+        }
+    }
+}
+
+/// In-flight confirmation prompt. When set, the App is in confirm mode
+/// and Enter runs the action while Esc cancels.
+#[derive(Clone)]
+pub struct ConfirmPrompt {
+    pub action_id: ActionId,
+    pub title: String,
+    pub detail: String,
+    pub danger: bool,
+}
+
 /// Top-level app state.
 pub struct App {
     #[allow(dead_code)] // Consumed in M6 (--reset-state), M8 (--dry-run, --log-level).
@@ -34,13 +80,13 @@ pub struct App {
     pub log_lines: Vec<LogLine>,
     pub should_quit: bool,
     pub job_manager: JobManager,
-    /// Cached metadata for the sidebar.
     pub action_metas: Vec<actions::ActionInfo>,
-    /// Last status of each action's most recent job.
     pub last_status: Vec<Option<JobStatus>>,
-    /// Per-action browser state, keyed by action id. Lazily populated
-    /// when an action is first focused in the main pane.
     pub browsers: HashMap<ActionId, Browser>,
+    /// Per-action picker state for `InputKind::Choice` actions.
+    pub choice_state: HashMap<ActionId, ChoicePicker>,
+    /// Active confirmation prompt, if any.
+    pub confirming: Option<ConfirmPrompt>,
 }
 
 impl App {
@@ -60,6 +106,8 @@ impl App {
             action_metas,
             last_status,
             browsers: HashMap::new(),
+            choice_state: HashMap::new(),
+            confirming: None,
         };
         app.push_log(
             LogStream::Info,
@@ -67,7 +115,7 @@ impl App {
         );
         app.push_log(
             LogStream::Info,
-            "M3: real actions wired. Pick one in the sidebar and use the browser.".into(),
+            "M4: reset_ableton + patch_ozone wired. Sidebar badges show last-run status.".into(),
         );
         app
     }
@@ -80,11 +128,16 @@ impl App {
         });
     }
 
-    /// Get or create the browser for an action.
     fn browser_for(&mut self, action_id: ActionId, input_kind: InputKind) -> &mut Browser {
         self.browsers
             .entry(action_id)
             .or_insert_with(|| Browser::new(default_browser_path(), input_kind))
+    }
+
+    fn choice_picker_for(&mut self, action_id: ActionId) -> &mut ChoicePicker {
+        self.choice_state
+            .entry(action_id)
+            .or_insert_with(|| ChoicePicker::new(reset_ableton::discover()))
     }
 
     /// Blocking render loop.
@@ -156,12 +209,76 @@ impl App {
             return;
         }
 
-        // Dispatch to the browser first if the main pane is focused.
-        // The browser consumes navigation keys and returns false for
-        // App-level keys (Enter to run, etc.).
+        // Confirm prompt is modal: Enter runs, Esc cancels.
+        if let Some(prompt) = self.confirming.clone() {
+            match action {
+                InputAction::Enter | InputAction::Quit => {
+                    self.confirming = None;
+                    self.start_confirmed_action(prompt).await;
+                }
+                InputAction::Esc => {
+                    self.confirming = None;
+                    self.push_log(LogStream::Info, format!("Cancelled \"{}\".", prompt.title));
+                }
+                _ => {}
+            }
+            return;
+        }
+
+        // Dispatch to the choice picker if the focused action is a Choice.
         if self.focus == Focus::Main {
             if let Some(meta) = self.action_metas.get(self.sidebar_index).cloned() {
-                if meta.input_kind != InputKind::None {
+                if meta.input_kind == InputKind::Choice {
+                    match action {
+                        InputAction::SidebarDown => {
+                            self.choice_picker_for(meta.id).cursor_down();
+                            return;
+                        }
+                        InputAction::SidebarUp => {
+                            self.choice_picker_for(meta.id).cursor_up();
+                            return;
+                        }
+                        InputAction::SidebarTop => {
+                            if let Some(p) = self.choice_state.get_mut(&meta.id) {
+                                p.cursor = 0;
+                            }
+                            return;
+                        }
+                        InputAction::SidebarBottom => {
+                            if let Some(p) = self.choice_state.get_mut(&meta.id) {
+                                if !p.versions.is_empty() {
+                                    p.cursor = p.versions.len() - 1;
+                                }
+                            }
+                            return;
+                        }
+                        InputAction::Enter => {
+                            self.begin_confirm_for_choice(&meta);
+                            return;
+                        }
+                        InputAction::Refresh => {
+                            // Re-discover installed versions.
+                            let fresh = reset_ableton::discover();
+                            if let Some(p) = self.choice_state.get_mut(&meta.id) {
+                                p.versions = fresh;
+                                p.cursor = p.cursor.min(p.versions.len().saturating_sub(1));
+                            }
+                            self.push_log(
+                                LogStream::Info,
+                                format!("Refreshed version list for \"{}\".", meta.label),
+                            );
+                            return;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+
+        // Dispatch to the browser first if the main pane is focused.
+        if self.focus == Focus::Main {
+            if let Some(meta) = self.action_metas.get(self.sidebar_index).cloned() {
+                if meta.input_kind == InputKind::Dir || meta.input_kind == InputKind::File {
                     let browser = self.browser_for(meta.id, meta.input_kind);
                     if browser.handle_key(action.clone()) {
                         return;
@@ -190,10 +307,6 @@ impl App {
             }
 
             InputAction::SidebarDown => {
-                // When the sidebar is focused, move the sidebar cursor.
-                // When main or log is focused, fall through (the browser
-                // already handled it via the dispatch above; for log, the
-                // key is unhandled).
                 if self.focus == Focus::Sidebar {
                     let max = self.action_metas.len();
                     if self.sidebar_index + 1 < max {
@@ -244,8 +357,6 @@ impl App {
                     "Yank to clipboard will be wired up in M3 (pbcopy).".into(),
                 );
             }
-            // The browser consumed these, but the App also receives them
-            // (we cloned the action). They're no-ops here.
             InputAction::OpenEntry
             | InputAction::GoUp
             | InputAction::ToggleCheck
@@ -258,77 +369,77 @@ impl App {
         }
     }
 
-    async fn run_focused(&mut self) {
-        if self.job_manager.is_running() {
+    /// Enter was pressed on a Choice action — start a confirm prompt.
+    fn begin_confirm_for_choice(&mut self, meta: &actions::ActionInfo) {
+        let Some(picker) = self.choice_state.get(&meta.id) else {
             self.push_log(
                 LogStream::Failure,
-                "A job is already running. Press Esc to cancel.".into(),
+                format!("No versions discovered for \"{}\".", meta.label),
             );
             return;
-        }
-
-        let Some(meta) = self.action_metas.get(self.sidebar_index).cloned() else {
+        };
+        let Some(version) = picker.selected() else {
+            self.push_log(
+                LogStream::Failure,
+                format!("No versions discovered for \"{}\".", meta.label),
+            );
             return;
         };
+        let detail = format!(
+            "Ableton {}\n  Prefs: ~/Library/Preferences/Ableton/{}\n  Templates: ~/Music/Ableton/User Library/Templates\n  Backups will land in ~/Desktop/.",
+            version.version, version.version
+        );
+        self.confirming = Some(ConfirmPrompt {
+            action_id: meta.id,
+            title: format!("Reset \"{}\"", version.version),
+            detail,
+            danger: true,
+        });
+    }
 
-        // Resolve the action's inputs from the browser (if any).
+    /// Enter was pressed on a None-input action (patch_ozone) — start
+    /// a confirm prompt.
+    fn begin_confirm_for_no_input(&mut self, meta: &actions::ActionInfo) {
+        let (detail, danger) = match meta.id {
+            "patch_ozone" => (
+                "Patches the iZotope Ozone 12 core binary in place.\n  /Library/Application Support/iZotope/*/iZOzone12Core\n  The patch is reversible only by reinstalling.".to_string(),
+                true,
+            ),
+            _ => (meta.hint.to_string(), false),
+        };
+        self.confirming = Some(ConfirmPrompt {
+            action_id: meta.id,
+            title: format!("Run \"{}\"", meta.label),
+            detail,
+            danger,
+        });
+    }
+
+    /// Confirm was accepted; resolve inputs and start the job.
+    async fn start_confirmed_action(&mut self, prompt: ConfirmPrompt) {
+        let Some(meta) = self
+            .action_metas
+            .iter()
+            .find(|m| m.id == prompt.action_id)
+            .cloned()
+        else {
+            return;
+        };
         let inputs = match meta.input_kind {
-            InputKind::None => crate::actions::ResolvedInputs::default(),
-            InputKind::Dir => {
-                let browser = self.browser_for(meta.id, meta.input_kind);
-                match browser.selected_dir() {
-                    Some(d) => crate::actions::ResolvedInputs {
-                        dir: Some(d),
-                        ..Default::default()
-                    },
-                    None => {
-                        self.push_log(
-                            LogStream::Failure,
-                            format!("Select a directory for \"{}\" first.", meta.label),
-                        );
-                        return;
-                    }
-                }
-            }
-            InputKind::File => {
-                let browser = self.browser_for(meta.id, meta.input_kind);
-                let file = browser.resolved_file().or_else(|| {
-                    // For multi-file actions, run with all checked files.
-                    let files = browser.checked_files();
-                    files.first().cloned()
-                });
-                match file {
-                    Some(f) => crate::actions::ResolvedInputs {
-                        file: Some(f),
-                        ..Default::default()
-                    },
-                    None => {
-                        self.push_log(
-                            LogStream::Failure,
-                            format!("Select a file for \"{}\" first.", meta.label),
-                        );
-                        return;
-                    }
-                }
-            }
             InputKind::Choice => {
-                let browser = self.browser_for(meta.id, meta.input_kind);
-                let choice = browser.path.to_string_lossy().to_string();
-                if choice.is_empty() {
-                    self.push_log(
-                        LogStream::Failure,
-                        format!("Make a choice for \"{}\" first.", meta.label),
-                    );
+                let Some(picker) = self.choice_state.get(&meta.id) else {
                     return;
-                }
+                };
+                let Some(version) = picker.selected() else {
+                    return;
+                };
                 crate::actions::ResolvedInputs {
-                    choice: Some(choice),
+                    choice: Some(version.version.clone()),
                     ..Default::default()
                 }
             }
+            _ => crate::actions::ResolvedInputs::default(),
         };
-
-        // Find the action instance and start it.
         for action in actions::all() {
             if action.info().id == meta.id {
                 match self.job_manager.start(action.as_ref(), inputs).await {
@@ -345,10 +456,92 @@ impl App {
                 return;
             }
         }
-        self.push_log(
-            LogStream::Failure,
-            format!("No action instance registered for id \"{}\".", meta.id),
-        );
+    }
+
+    async fn run_focused(&mut self) {
+        if self.job_manager.is_running() {
+            self.push_log(
+                LogStream::Failure,
+                "A job is already running. Press Esc to cancel.".into(),
+            );
+            return;
+        }
+
+        let Some(meta) = self.action_metas.get(self.sidebar_index).cloned() else {
+            return;
+        };
+
+        match meta.input_kind {
+            InputKind::None => {
+                self.begin_confirm_for_no_input(&meta);
+            }
+            InputKind::Dir => {
+                let browser = self.browser_for(meta.id, meta.input_kind);
+                match browser.selected_dir() {
+                    Some(d) => {
+                        let inputs = crate::actions::ResolvedInputs {
+                            dir: Some(d),
+                            ..Default::default()
+                        };
+                        self.start_action(&meta, inputs).await;
+                    }
+                    None => {
+                        self.push_log(
+                            LogStream::Failure,
+                            format!("Select a directory for \"{}\" first.", meta.label),
+                        );
+                    }
+                }
+            }
+            InputKind::File => {
+                let browser = self.browser_for(meta.id, meta.input_kind);
+                let file = browser.resolved_file().or_else(|| {
+                    let files = browser.checked_files();
+                    files.first().cloned()
+                });
+                match file {
+                    Some(f) => {
+                        let inputs = crate::actions::ResolvedInputs {
+                            file: Some(f),
+                            ..Default::default()
+                        };
+                        self.start_action(&meta, inputs).await;
+                    }
+                    None => {
+                        self.push_log(
+                            LogStream::Failure,
+                            format!("Select a file for \"{}\" first.", meta.label),
+                        );
+                    }
+                }
+            }
+            InputKind::Choice => {
+                self.begin_confirm_for_choice(&meta);
+            }
+        }
+    }
+
+    async fn start_action(
+        &mut self,
+        meta: &actions::ActionInfo,
+        inputs: crate::actions::ResolvedInputs,
+    ) {
+        for action in actions::all() {
+            if action.info().id == meta.id {
+                match self.job_manager.start(action.as_ref(), inputs).await {
+                    Ok(()) => {
+                        self.push_log(LogStream::Info, format!("Started \"{}\".", meta.label));
+                    }
+                    Err(e) => {
+                        self.push_log(
+                            LogStream::Failure,
+                            format!("Failed to start \"{}\": {e}", meta.label),
+                        );
+                    }
+                }
+                return;
+            }
+        }
     }
 }
 
